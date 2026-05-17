@@ -14,6 +14,7 @@ from aiohttp import web, ClientSession, WSMsgType
 
 HERMES_HOME = "/root/.hermes"
 UPSTREAM = "http://127.0.0.1:9119"
+LINE_UPSTREAM = f"http://127.0.0.1:{os.environ.get('LINE_PORT', '8646')}"
 USERNAME = os.environ.get("DASHBOARD_USER", "admin")
 PASSWORD = os.environ.get("DASHBOARD_PASSWORD", "")
 SECRET = secrets.token_bytes(32)
@@ -276,7 +277,7 @@ async def logout(request):
 
 @web.middleware
 async def auth_middleware(request, handler):
-    if request.path in ("/login", "/logout", "/api/health"):
+    if request.path in ("/login", "/logout", "/api/health") or request.path.startswith("/line/"):
         return await handler(request)
 
     token = request.cookies.get(COOKIE)
@@ -426,6 +427,22 @@ async def proxy(request):
                 return web.Response(status=resp.status, headers=html_headers, text=html, content_type="text/html")
             return web.Response(status=resp.status, headers=proxy_headers, body=content)
 
+async def proxy_line(request):
+    async with ClientSession() as session:
+        url = f"{LINE_UPSTREAM}{request.path_qs}"
+        headers = {k: v for k, v in request.headers.items()
+                   if k.lower() not in ("host", "transfer-encoding")}
+        body = await request.read()
+        async with session.request(
+            request.method, url, headers=headers,
+            data=body, allow_redirects=False,
+        ) as resp:
+            excluded = {"transfer-encoding", "content-encoding", "content-length"}
+            proxy_headers = {k: v for k, v in resp.headers.items()
+                             if k.lower() not in excluded}
+            content = await resp.read()
+            return web.Response(status=resp.status,
+                                headers=proxy_headers, body=content)
 
 async def on_startup(app):
     start_gateway()
@@ -440,6 +457,7 @@ def create_app():
     app.router.add_get("/api/health", health)
     app.router.add_post("/api/gateway/restart", restart_gateway)
     app.router.add_get("/api/gateway/status", gateway_status)
+    app.router.add_route("*", "/line/{path_info:.*}", proxy_line) 
     app.router.add_route("*", "/{path_info:.*}", proxy)
     return app
 
